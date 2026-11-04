@@ -1,5 +1,10 @@
+# 自用文档不入库（发布清单里也不能有）
 README.internal.md
-dist/
+
+# 全量构建产物（破甲版）不入库；公开构建产物必须入库，否则 GitHub 安装后没有可运行的 server
+dist/full/
+
+# 本地环境
 .env
 .env.local
 node_modules/

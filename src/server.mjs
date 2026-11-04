@@ -23,6 +23,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import {
   existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, statSync,
+  renameSync, unlinkSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -84,7 +85,7 @@ function listJson(dir) {
     .map((f) => {
       const p = join(dir, f)
       const st = statSync(p)
-      return { file: f, path: p, size: st.size, mtime: st.mtime.toISOString() }
+      return { file: f, path: p, size: st.size, mtime: isoLocal(st.mtime.getTime()) }
     })
     .sort((a, b) => (a.mtime < b.mtime ? 1 : -1))
 }
@@ -93,6 +94,64 @@ function readJson(p) {
   try { return JSON.parse(readFileSync(p, 'utf8')) } catch (e) {
     return { _parse_error: String(e.message), _raw: readFileSync(p, 'utf8').slice(0, 500) }
   }
+}
+
+// ---------------------------------------------------------------- time helpers
+/**
+ * 本地时区的 ISO 8601（带偏移，如 2026-11-04T13:37:09+08:00）。
+ *
+ * 统一用它，而不是 `toISOString()`：WorkBuddy 写回的结果里 `finished_at` 用本地偏移，
+ * 我们若在 task.json / schedule 响应里写 UTC（...Z），同一个协作目录里就混着两种时区，
+ * 人和脚本都得自己做二次换算。epoch 毫秒字段（*_ms / next_run_at）保持原样不动。
+ */
+function isoLocal(ms = Date.now()) {
+  const d = new Date(ms)
+  const p = (n) => String(n).padStart(2, '0')
+  const offMin = -d.getTimezoneOffset()
+  const sign = offMin >= 0 ? '+' : '-'
+  const abs = Math.abs(offMin)
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+    + `T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+    + `${sign}${p(Math.floor(abs / 60))}:${p(abs % 60)}`
+}
+
+/** 文件名安全的时间戳：20261104-133709。 */
+function stampLocal(ms = Date.now()) {
+  const d = new Date(ms)
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`
+    + `-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+}
+
+/** 单次工具调用最多等多久：受 dsh-mcp-client 的 toolCallTimeoutMs（默认 60s）约束。 */
+const WAIT_MAX_SECONDS = 240
+
+function waitSeconds(value, fallback) {
+  const raw = value === undefined || value === null ? fallback : Number(value)
+  if (!Number.isFinite(raw) || raw <= 0) return 0
+  return Math.min(Math.floor(raw), WAIT_MAX_SECONDS)
+}
+
+/** 把文件挪进目录；目标已存在时退化为「写入再删除」，避免 rename 在 Windows 上失败。 */
+function moveInto(path, dir) {
+  mkdirSync(dir, { recursive: true })
+  const target = join(dir, basenameOf(path))
+  try {
+    if (existsSync(target)) {
+      writeFileSync(target, readFileSync(path))
+      unlinkSync(path)
+    } else {
+      renameSync(path, target)
+    }
+    return target
+  } catch {
+    return null
+  }
+}
+
+function basenameOf(p) {
+  const i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))
+  return i < 0 ? p : p.slice(i + 1)
 }
 
 // ---------------------------------------------------------------- db helpers
@@ -252,7 +311,7 @@ const TOOL_SUBMIT = {
       inputs: { type: 'array', items: { type: 'string' }, description: '协作目录内的相对路径' },
       expect_keys: { type: 'array', items: { type: 'string' }, description: '结果必需字段，默认 id/status/answer/sources' },
       wake: { type: 'boolean', description: '写完后是否立刻触发，默认 true' },
-      wait_seconds: { type: 'number', description: 'wake=true 时最多等待秒数，默认 240' },
+      wait_seconds: { type: 'number', description: 'wake=true 时最多等待秒数，默认 240；上限 240（受客户端 toolCallTimeoutMs 约束）' },
     },
     required: ['prompt'],
     additionalProperties: false,
@@ -262,13 +321,17 @@ const TOOL_SUBMIT = {
 
 const TOOL_READ = {
   name: 'wb_read_result',
-  description: '读取 out/ 里的结果：指定 id 读单个，缺省读最新的；同时返回待处理任务列表。',
+  description: '读取 out/ 里的结果：指定 id 读单个，缺省读最新的；同时返回待处理任务列表。'
+    + '指定 id 时默认把该结果归档到 done/（archive:false 可关闭），归档后仍可用同一个 id 重读。',
   inputSchema: {
     type: 'object',
-    properties: { id: { type: 'string', description: '任务 id（不含扩展名）' } },
+    properties: {
+      id: { type: 'string', description: '任务 id（不含扩展名）' },
+      archive: { type: 'boolean', description: '读完是否移动到 done/；指定 id 时默认 true，读最新时默认 false' },
+    },
     additionalProperties: false,
   },
-  annotations: { readOnlyHint: true, openWorldHint: false },
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
 }
 
 const TOOL_WAKE = {
@@ -276,7 +339,7 @@ const TOOL_WAKE = {
   description: '立刻触发一次执行（不改任务内容）。可等待运行结束。',
   inputSchema: {
     type: 'object',
-    properties: { wait_seconds: { type: 'number', description: '0 = 只触发不等待（默认）；>0 = 等待结束' } },
+    properties: { wait_seconds: { type: 'number', description: '0 = 只触发不等待（默认）；>0 = 等待结束，上限 240' } },
     additionalProperties: false,
   },
   annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
@@ -290,7 +353,7 @@ const TOOL_SCHEDULE = {
     properties: {
       delay_seconds: { type: 'number', description: '多少秒后执行，例如 600 = 10 分钟后' },
       at: { type: 'string', description: 'ISO 时间点，例如 2026-11-03T20:00:00+08:00' },
-      wait_seconds: { type: 'number', description: '>0 时在触发后等待运行结束' },
+      wait_seconds: { type: 'number', description: '>0 时在触发后等待运行结束，上限 240' },
     },
     additionalProperties: false,
   },
@@ -356,48 +419,82 @@ const HANDLERS = {
 
   async wb_submit_task(args) {
     ensureDirs()
-    const id = args.id || `task-${new Date().toISOString().replace(/[:.]/g, '-')}`
+    const id = args.id || `task-${stampLocal()}`
     const task = {
       id,
       type: args.type || 'question',
       prompt: args.prompt,
       inputs: args.inputs || [],
       expect: { format: 'json', keys: args.expect_keys || ['id', 'status', 'answer', 'sources'] },
-      created_at: new Date().toISOString(),
+      created_at: isoLocal(),
       producer: 'mcp',
     }
     const path = join(DIRS.in, `${id}.task.json`)
     writeFileSync(path, JSON.stringify(task, null, 2) + '\n', 'utf8')
-    const out = { task_id: id, task_path: path, triggered: false }
+    const out = { task_id: id, task_path: path, created_at: task.created_at, triggered: false }
     if (args.wake !== false) {
       const at = Date.now()
       setAutomation({ next_run_at: at })
       out.triggered = true
       out.next_run_at = at
-      const wait = args.wait_seconds === undefined ? 240 : args.wait_seconds
+      out.next_run_iso = isoLocal(at)
+      const wait = waitSeconds(args.wait_seconds, 240)
       if (wait > 0) out.run = await waitForRun({ timeoutSeconds: wait })
       const resultPath = join(DIRS.out, `${id}.result.json`)
-      if (existsSync(resultPath)) out.result = readJson(resultPath)
+      if (existsSync(resultPath)) {
+        out.result = readJson(resultPath)
+        if (out.run?.finished) {
+          const archived = moveInto(resultPath, DIRS.done)
+          out.archived_to = archived
+        }
+      } else {
+        out.result_pending = true
+      }
     }
     return text(out)
   },
 
   async wb_read_result(args) {
     ensureDirs()
+    const pending = () => listJson(DIRS.in).map((f) => f.file)
+    if (args.id) {
+      const name = `${args.id}.result.json`
+      const inOut = join(DIRS.out, name)
+      const inDone = join(DIRS.done, name)
+      const fromOut = existsSync(inOut)
+      const source = fromOut ? inOut : (existsSync(inDone) ? inDone : null)
+      if (!source) {
+        return text({
+          error: `not found: ${name}`,
+          searched: [DIRS.out, DIRS.done],
+          available: [...listJson(DIRS.out), ...listJson(DIRS.done)].map((o) => o.file),
+          pending_tasks: pending(),
+        })
+      }
+      const result = readJson(source)
+      const shouldArchive = args.archive === undefined ? true : Boolean(args.archive)
+      const archivedTo = fromOut && shouldArchive ? moveInto(inOut, DIRS.done) : null
+      return text({ result, file: source, archived_to: archivedTo, pending_tasks: pending() })
+    }
+
     const outs = listJson(DIRS.out)
     if (!outs.length) {
-      return text({ results: [], pending_tasks: listJson(DIRS.in).map((f) => f.file), note: 'out/ 为空' })
+      return text({
+        results: [],
+        archived: listJson(DIRS.done).map((o) => o.file),
+        pending_tasks: pending(),
+        note: 'out/ 为空',
+      })
     }
-    if (args.id) {
-      const p = join(DIRS.out, `${args.id}.result.json`)
-      if (!existsSync(p)) return text({ error: `not found: ${args.id}.result.json`, available: outs.map((o) => o.file) })
-      return text({ result: readJson(p) })
-    }
+    const latest = outs[0]
+    const result = readJson(latest.path)
+    const archivedTo = args.archive === true ? moveInto(latest.path, DIRS.done) : null
     return text({
-      latest: outs[0].file,
-      result: readJson(outs[0].path),
+      latest: latest.file,
+      result,
+      archived_to: archivedTo,
       all: outs.map((o) => ({ file: o.file, mtime: o.mtime, size: o.size })),
-      pending_tasks: listJson(DIRS.in).map((f) => f.file),
+      pending_tasks: pending(),
     })
   },
 
@@ -405,8 +502,8 @@ const HANDLERS = {
   async wb_wake(args) {
     const at = Date.now()
     setAutomation({ next_run_at: at })
-    const res = { next_run_at: at, next_run_iso: new Date(at).toISOString() }
-    const wait = args.wait_seconds || 0
+    const res = { next_run_at: at, next_run_iso: isoLocal(at) }
+    const wait = waitSeconds(args.wait_seconds, 0)
     if (wait > 0) res.run = await waitForRun({ timeoutSeconds: wait })
     return text(res)
   },
@@ -425,11 +522,11 @@ const HANDLERS = {
     setAutomation({ next_run_at: at })
     const res = {
       scheduled_at_ms: at,
-      scheduled_at_iso: new Date(at).toISOString(),
+      scheduled_at_iso: isoLocal(at),
       in_seconds: Math.round((at - Date.now()) / 1000),
       note: '一次性安排；期间再次触发或改写会被覆盖',
     }
-    const wait = args.wait_seconds || 0
+    const wait = waitSeconds(args.wait_seconds, 0)
     if (wait > 0) res.run = await waitForRun({ timeoutSeconds: wait })
     return text(res)
   },

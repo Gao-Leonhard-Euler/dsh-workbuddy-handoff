@@ -1,0 +1,40 @@
+{
+  "name": "workbuddy-handoff",
+  "version": "1.0.0",
+  "description": "第三方 DSH 插件：把 WorkBuddy 桌面版的定时任务桥接成 MCP 工具（投任务、读结果、立即/延迟触发、切换模型与思考模式）。与 DeepSeek 及 WorkBuddy 官方均无关。",
+  "type": "module",
+  "private": false,
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "dsh-bundle",
+    "workbuddy",
+    "mcp",
+    "mcp-server",
+    "automation",
+    "scheduler"
+  ],
+  "files": [
+    "cordis.patch.yml",
+    "dist/public/**",
+    "README.md",
+    ".env.example",
+    "src/**",
+    "build.mjs",
+    "test/**"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "build:full": "node build.mjs --full",
+    "test": "node test/selftest.mjs"
+  }
+}

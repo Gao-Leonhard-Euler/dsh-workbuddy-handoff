@@ -1,0 +1,31 @@
+# workbuddy-handoff bundle patch
+#
+# 这是 profile 的一层 overlay：安装本包后，DSH 启动时会自动 insert 下面这一行，
+# 用 @deepseek-ai/dsh-mcp-client 以 stdio 方式拉起本包自带的 MCP server。
+#
+# 路径说明：安装后本包位于 <profile>/node_modules/workbuddy-handoff/，而 args 会原样
+# 交给 spawn，所以这里用 Loader 的 !!js 在 Harness 进程内求值，规避写死绝对路径。
+# 求值顺序（第一个可用者胜出）：
+#   1. WB_HANDOFF_SERVER —— 显式覆盖（可在 <dshHome>/.env 里设置）
+#   2. argv 中形如 .../profiles/<name> 的那一项 —— 桌面端宿主就是这样拿到 profile 目录的
+#   3. DSH_PROFILE_DIR —— CLI / 部分宿主会设置
+#   4. DSH_HOME + DSH_PROFILE —— 最后兜底
+- insert:
+    - id: mcp-workbuddy-handoff
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: 'workbuddy-handoff'
+        transport: 'stdio'
+        command: 'node'
+        args:
+          - !!js >-
+              process.env.WB_HANDOFF_SERVER ||
+              ((process.argv.find((a) => /[\\/]profiles[\\/][^\\/]+$/.test(String(a)))
+                || process.env.DSH_PROFILE_DIR
+                || ((process.env.DSH_HOME || '') + '/profiles/' + (process.env.DSH_PROFILE || 'desktop'))
+              ).replace(/[\\/]+$/, '') + '/node_modules/workbuddy-handoff/dist/public/server.mjs')
+        failOnStartupError: true
+        # 客户端默认每次工具调用只等 60s（DEFAULT_TOOL_CALL_TIMEOUT_MS = 60000），
+        # 而一次 WorkBuddy 运行常见 30~90s：wait_seconds 一超过 60 就会在客户端侧先超时，
+        # 任务却已经跑完了。放宽到 5 分钟，覆盖插件默认的最长等待（240s）。
+        toolCallTimeoutMs: 300000

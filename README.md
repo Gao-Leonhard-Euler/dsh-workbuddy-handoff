@@ -110,13 +110,29 @@ WB_AUTOMATION_NAME=DSH 处理器
 
 需要 Node.js ≥ 20（`node:sqlite`）。
 
+### 方式 A：作为 DSH 插件安装（推荐）
+
+本仓库同时是一个 DSH **bundle 包**（`package.json` 里声明了 `dsh.bundle.patch`，补丁文件是 `cordis.patch.yml`）。安装后 DSH 会在启动时自动挂载里面的 MCP server，**不需要手工改 profile**。
+
+```bash
+# 从 GitHub 直接装（把 <owner> 换成实际仓库owner）
+dsh plugin --profile desktop add github:<owner>/workbuddy-handoff
+
+# 或本地目录（绝对路径，安装后会 link 进 profile）
+dsh plugin --profile desktop add C:\path\to\workbuddy-handoff
+```
+
+也可以在 DSH 的**插件管理**页粘贴同样的 spec 安装。装完重启 DSH，插件列表里应出现 `workbuddy-handoff`，工具名以 `mcp__workbuddy-handoff__` 开头。
+
+> bundle 里的路径用 Loader 的 `!!js` 表达式求值（`$DSH_PROFILE_DIR/node_modules/workbuddy-handoff/dist/public/server.mjs`），所以装在不同 profile、不同机器上都不用改。
+
+### 方式 B：作为普通 MCP server 挂载
+
 ```bash
 git clone <repo> && cd workbuddy-handoff
 node build.mjs          # 产物在 dist/public/
 node test/selftest.mjs  # 自检：握手 + 工具清单 + 只读调用
 ```
-
-挂进 MCP 宿主：
 
 ```json
 {
@@ -152,16 +168,21 @@ DeepSeek Harness 用户也可以写成 profile 补丁（`$DSH_HOME/profiles/<pro
 | 工具 | 说明 | 只读 |
 |---|---|---|
 | `wb_submit_task` | 写 `<id>.task.json` 到 `handoff/in/`，可选立刻触发并等待结果 | 否 |
-| `wb_read_result` | 读 `handoff/out/`：指定 id 或最新一条，附待处理列表 | ✅ |
+| `wb_read_result` | 读 `handoff/out/`：指定 id 或最新一条，附待处理列表；指定 id 时默认归档到 `done/` | 否（会移动文件） |
 | `wb_status` | 配置、任务状态、运行态、待处理数、最近运行 | ✅ |
 
 ```jsonc
-// 投任务 + 立刻执行 + 等结果（默认行为）
+// 投任务 + 立刻执行 + 等结果（默认行为，最长等 240 秒）
 { "prompt": "把 data.xlsx 转成 markdown 表格", "type": "doc_transform",
-  "inputs": ["data.xlsx"], "wait_seconds": 300 }
+  "inputs": ["data.xlsx"], "wait_seconds": 120 }
 
 // 只投不跑（之后手动在 WorkBuddy 点运行也能跑）
 { "prompt": "...", "wake": false }
+
+// 读结果：读完归档到 done/，同一 id 之后仍可重读
+{ "id": "doc-20261104-133709" }
+// 只想看不想动文件
+{ "id": "doc-20261104-133709", "archive": false }
 ```
 
 ### Tier 1 — 触发层（只写 `next_run_at` 一列）
