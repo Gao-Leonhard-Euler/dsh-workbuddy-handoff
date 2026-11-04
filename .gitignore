@@ -1,0 +1,9 @@
+README.internal.md
+dist/
+.env
+.env.local
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+.git/
