@@ -1,5 +1,8 @@
 # workbuddy-handoff
 
+*代码由deepseek V4.1 flash在deepseek harness中编写*\
+*code was written by deepseek V4.1 flash in deepseek harness*
+
 把 **WorkBuddy 桌面版的定时任务**桥接成 MCP 工具，让任意 MCP 宿主（DeepSeek Harness、Claude Desktop、自研 Agent、脚本）可以：
 
 - 投递任务并拿回结构化结果
@@ -215,4 +218,4 @@ node test/selftest.mjs      # 产物是否正常
 
 ## 许可
 
-MIT。第三方项目，请勿用于违反 WorkBuddy 服务条款的用途。
+MIT。第三方项目，请勿用于违反 WorkBuddy 或 Deepseek Harness 服务条款的用途。
